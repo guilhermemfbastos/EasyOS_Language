@@ -1,0 +1,5 @@
+boot.start
+Screen.Color('0A')
+printScreen(' WhaleOS Monolithic Kernel v5.5 (TCC Native)')
+printScreen(' ---------------------------------------------')
+always()
