@@ -1,5 +1,10 @@
-/* --- WhaleOS Self-Hosted Monolithic OS --- */
+/* --- WhaleOS Extensible Engine Target --- */
 #include <stdint.h>
+
+int k_strcmp(const char* s1, const char* s2) {
+    while (*s1 && (*s1 == *s2)) { s1++; s2++; }
+    return *(const unsigned char*)s1 - *(const unsigned char*)s2;
+}
 
 static inline uint8_t inb(uint16_t port) {
     uint8_t ret;
@@ -12,6 +17,7 @@ int cursor_idx = 0;
 int editor_mode_active = 0;
 uint8_t current_color_attribute = 0x0A;
 int shift_pressed = 0;
+char current_tag[32] = "[WhaleOS]# ";
 
 void k_print(const char* str) {
     while (*str) {
@@ -80,13 +86,19 @@ void sys_vfs_write(const char* name, const char* data) {
     fs_count++;
 }
 
+void sys_vfs_list() {
+    k_print("\nArquivos no VFS:\n");
+    if(fs_count == 0) { k_print("  (vazio)\n"); }
+    for(int idx = 0; idx < fs_count; idx++) { k_print("  - "); k_print(storage_ram[idx].name); k_print("\n"); }
+}
+
 void run_native_tcc_compiler(const char* code) {
-    k_print("\n[WhaleOS TCC v1.0] Iniciando compilacao nativa no Heap...\n");
+    k_print("\n[WhaleOS TCC v1.0] Compilando no Heap...\n");
     int loop_limit = 1; char print_buffer[64] = {0};
     int has_for = 0; int has_printf = 0;
 
     char* token_table = (char*)whale_malloc(256);
-    if(!token_table) { k_print("[FATAL] Sem memoria RAM.\n"); return; }
+    if(!token_table) return;
 
     char* cursor = (char*)code;
     while(*cursor) {
@@ -119,12 +131,11 @@ void run_native_tcc_compiler(const char* code) {
     }
 
     if(has_printf) {
-        k_print("[TCC] Binario gerado com sucesso! Executando:\n");
         for(int i = 0; i < loop_limit; i++) {
             if(has_for) { k_print("Iteracao "); k_print_char('0' + i); k_print(": "); }
             k_print(print_buffer);
         }
-    } else { k_print("[TCC Warning] Codigo compilado sem rotinas VGA.\n"); }
+    }
     whale_free(token_table);
 }
 
@@ -133,80 +144,48 @@ char kbd_map_normal[128] = { 0, 27, '1', '2', '3', '4', '5', '6', '7', '8', '9',
 char kbd_map_shift[128]  = { 0, 27, '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '\b', '\t', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n', 0, 'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '"', '~', 0, '|',  'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?', 0, '*', 0, ' ' };
 
 void process_shell_command(char* cmd) {
-    if (cmd[0] == 'm' && cmd[1] == 'a' && cmd[2] == 'l' && cmd[3] == 'l' && cmd[4] == 'o' && cmd[5] == 'c') {
-        k_print("\n[Malloc] Alocando 16 bytes no Heap...\n");
+    if (k_strcmp(cmd, "malloc") == 0) {
+        k_print("\n[Malloc] Alocando 16 bytes...\n");
         void* ptr = whale_malloc(16);
-        if(ptr) { k_print("[OK] Bloco reservado. Liberando...\n"); whale_free(ptr); }
+        if(ptr) { k_print("[OK] Sucesso!\n"); whale_free(ptr); }
     }
-    else if (cmd[0] == 's' && cmd[1] == 'a' && cmd[2] == 'v' && cmd[3] == 'e') {
-        int i = 5, j = 0; char f_target[16]; while(cmd[i]) { f_target[j++] = cmd[i++]; } f_target[j] = 0;
-        sys_vfs_write(f_target, "Salvo com sucesso."); k_print("\n[VFS] Arquivo gravado!\n");
-    }
-    else if (cmd[0] == 'd' && cmd[1] == 'i' && cmd[2] == 'r') {
-        k_print("\nArquivos no VFS:\n");
-        for(int idx = 0; idx < fs_count; idx++) { k_print("  - "); k_print(storage_ram[idx].name); k_print("\n"); }
-    }
-    else if (cmd[0] == 'e' && cmd[1] == 'd' && cmd[2] == 'i' && cmd[3] == 't') {
-        int i = 5, j = 0; while(cmd[i]) { saved_editor_name[j++] = cmd[i++]; } saved_editor_name[j] = 0;
-        k_print("\n[EDITOR] Digite o texto e ENTER:\n> "); editor_mode_active = 1;
-    }
-    else if (cmd[0] == 'c' && cmd[1] == 'a' && cmd[2] == 't') {
-        int i = 4, j = 0; char f_search[16]; int found = 0;
-        while(cmd[i]) { f_search[j++] = cmd[i++]; } f_search[j] = 0;
-        for(int idx = 0; idx < fs_count; idx++) {
-            int m = 0; while(f_search[m] && storage_ram[idx].name[m] == f_search[m]) m++;
-            if(f_search[m] == 0 && storage_ram[idx].name[m] == 0) {
-                k_print("\n"); k_print(storage_ram[idx].content); k_print("\n"); found = 1; break;
-            }
-        }
-        if(!found) { k_print("\nNao encontrado.\n"); }
-    }
-    else if (cmd[0] == 'g' && cmd[1] == 'c' && cmd[2] == 'c') {
-        int i = 4, j = 0; char f_search[16]; int found = 0;
-        while(cmd[i]) { f_search[j++] = cmd[i++]; } f_search[j] = 0;
-        for(int idx = 0; idx < fs_count; idx++) {
-            int m = 0; while(f_search[m] && storage_ram[idx].name[m] == f_search[m]) m++;
-            if(f_search[m] == 0 && storage_ram[idx].name[m] == 0) {
-                run_native_tcc_compiler(storage_ram[idx].content); found = 1; break;
-            }
-        }
-        if(!found) { k_print("\nNao encontrado.\n"); }
+    else if (k_strcmp(cmd, "dir") == 0) {
+        sys_vfs_list();
     }
 }
 
-void handle_keyboard() {
-    if (inb(0x64) & 1) {
-        uint8_t scancode = inb(0x60);
-        if (scancode == 0x2A || scancode == 0x36) { shift_pressed = 1; }
-        else if (scancode == 0xAA || scancode == 0xB6) { shift_pressed = 0; }
-        else if (!(scancode & 0x80)) {
-            char key = shift_pressed ? kbd_map_shift[scancode] : kbd_map_normal[scancode];
-            if (key == '\n') {
-                input_buffer[input_len] = 0;
-                if (editor_mode_active) {
-                    sys_vfs_write(saved_editor_name, input_buffer);
-                    k_print("\n[VFS] Arquivo salvo!\n[WhaleOS]# ");
-                    editor_mode_active = 0; saved_editor_name[0] = 0;
-                } else {
-                    process_shell_command(input_buffer);
-                    if (!editor_mode_active) k_print("\n[WhaleOS]# ");
-                }
-                input_len = 0;
-            } else if (key == '\b') {
-                if (input_len > 0) { input_len--; cursor_idx -= 2; vga_mem[cursor_idx] = ' '; }
-            } else if (key > 0 && input_len < 63) {
-                input_buffer[input_len++] = key; k_print_char(key);
-            }
-        }
-    }
-}
 
 void whale_kernel_main() {
+    int i = 0;
+    while("WhaleOS C:/"[i]) { current_tag[i] = "WhaleOS C:/"[i]; i++; } current_tag[i] = 0;
     init_whale_malloc();
-    for(int i=0; i<80*25*2; i+=2) { vga_mem[i]=' '; vga_mem[i+1]=current_color_attribute; }
     current_color_attribute = 0x0A;
-    k_print(" WhaleOS Monolithic Kernel v5.5 (TCC Native)\n");
-    k_print(" ---------------------------------------------\n");
-    k_print("\n[WhaleOS Shell Ativo]\n[WhaleOS]# ");
-    while(1) { handle_keyboard(); }
+    for(int i=0; i<80*25*2; i+=2) { vga_mem[i]=' '; vga_mem[i+1]=current_color_attribute; }
+    k_print("[WhaleOS Framework Shell Ativo]\n");
+    k_print(current_tag);
+    while(1) {
+        if (inb(0x64) & 1) {
+            uint8_t scancode = inb(0x60);
+            if (scancode == 0x2A || scancode == 0x36) { shift_pressed = 1; }
+            else if (scancode == 0xAA || scancode == 0xB6) { shift_pressed = 0; }
+            else if (!(scancode & 0x80)) {
+                char key = shift_pressed ? kbd_map_shift[scancode] : kbd_map_normal[scancode];
+                if (key == '\n') {
+                    input_buffer[input_len] = 0;
+                    /* --- Execucao do Interpretador Customizado --- */
+                    if (k_strcmp(input_buffer, "dir") == 0) {
+                    sys_vfs_list();
+                    } else {
+                    k_print("\nComando nao reconhecido no motor da baleia");
+                    }
+                    if(!editor_mode_active) { k_print("\n"); k_print(current_tag); }
+                    input_len = 0;
+                } else if (key == '\b') {
+                    if (input_len > 0) { input_len--; cursor_idx -= 2; vga_mem[cursor_idx] = ' '; }
+                } else if (key > 0 && input_len < 63) {
+                    input_buffer[input_len++] = key; k_print_char(key);
+                }
+            }
+        }
+    }
 }

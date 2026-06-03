@@ -1,5 +1,13 @@
 boot.start
 Screen.Color('0A')
-printScreen(' WhaleOS Monolithic Kernel v5.5 (TCC Native)')
-printScreen(' ---------------------------------------------')
+TagScreen('WhaleOS C:/')
+
+bootWith.Shell = False
+
+if ('dir') {
+    FileMode.List
+} else {
+    printScreen('Comando nao reconhecido no motor da baleia')
+}
+
 always()
