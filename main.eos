@@ -1,13 +1,27 @@
 boot.start
-Screen.Color('0A')
-TagScreen('WhaleOS C:/')
 
-bootWith.Shell = False
+bootSet.ExecutableApp = .mxw
 
-if ('dir') {
-    FileMode.List
-} else {
-    printScreen('Comando nao reconhecido no motor da baleia')
+import.MyAppExecutable Calculadora.mxw
+import.MyAppExecutable Editor.mxw
+
+EasyOS.System.Graphics.Draw.start()
+
+// DESENHANDO A IMAGEM NO CENTRO DA TELA (Largura 100, Altura 100, X 460, Y 300)
+Draw.Image("logo.png", 100, 100, 460, 300)
+
+// Barra de tarefas Larga (Agora a tela tem 1024 pixels!)
+Draw.Rectangle(1024, 40, 8, 0, 728, 2)
+// Botão Start
+Draw.Rectangle(60, 20, 1, 10, 738, 1)
+Draw.Label("START", 15, 20, 744, 1)
+
+EasyOS.System.Graphics.Mouse.start()
+EasyOS.System.Graphics.Action.start
+
+if (1) {
+    // Menu Gigante!
+    Draw.Start("Montenegro Work", 300, 200, 9, 0, 428)
 }
 
 always()

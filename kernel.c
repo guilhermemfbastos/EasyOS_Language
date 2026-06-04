@@ -1,9 +1,23 @@
-/* --- WhaleOS Extensible Engine Target --- */
+/* --- WhaleOS 32-Bit True Color Engine (Debounced Click) --- */
 #include <stdint.h>
 
+#include "img_0.h"
+
 int k_strcmp(const char* s1, const char* s2) {
-    while (*s1 && (*s1 == *s2)) { s1++; s2++; }
+    while (*s1 && (*s1 == *s2)) {
+        s1++; s2++;
+    }
     return *(const unsigned char*)s1 - *(const unsigned char*)s2;
+}
+
+void k_memcpy(void* dest, const void* src, uint32_t count) {
+    uint8_t* d = (uint8_t*)dest;
+    const uint8_t* s = (const uint8_t*)src;
+    while (count--) *d++ = *s++;
+}
+
+void k_strcpy(char* dest, const char* src) {
+    while ((*dest++ = *src++));
 }
 
 static inline uint8_t inb(uint16_t port) {
@@ -12,180 +26,319 @@ static inline uint8_t inb(uint16_t port) {
     return ret;
 }
 
-volatile char* vga_mem = (volatile char*)0xB8000;
-int cursor_idx = 0;
-int editor_mode_active = 0;
-uint8_t current_color_attribute = 0x0A;
-int shift_pressed = 0;
-char current_tag[32] = "[WhaleOS]# ";
-
-void k_print(const char* str) {
-    while (*str) {
-        if (*str == '\n') { cursor_idx = ((cursor_idx / 160) + 1) * 160; }
-        else { vga_mem[cursor_idx++] = *str; vga_mem[cursor_idx++] = current_color_attribute; }
-        str++;
-    }
+static inline void outb(uint16_t port, uint8_t val) {
+    __asm__ volatile("outb %b0, %w1" : : "a"(val), "Nd"(port));
 }
 
-void k_print_char(char c) {
-    if (c == '\n') { cursor_idx = ((cursor_idx / 160) + 1) * 160; }
-    else { vga_mem[cursor_idx++] = c; vga_mem[cursor_idx++] = current_color_attribute; }
+volatile uint32_t* vga;
+uint32_t double_buffer[1024 * 768];
+
+const uint32_t legacy_palette[16] = {
+    0x00000000, 0xFF0000AA, 0xFF00AA00, 0xFF00AAAA,
+    0xFFAA0000, 0xFFAA00AA, 0xFFAA5500, 0xFFAAAAAA,
+    0xFF555555, 0xFF5555FF, 0xFF55FF55, 0xFF55FFFF,
+    0xFFFF5555, 0xFFFF55FF, 0xFFFFFF55, 0xFFFFFFFF
+};
+
+uint32_t get_color(uint32_t c) {
+    if (c <= 15) return legacy_palette[c];
+    return c;
 }
 
-#define HEAP_SIZE 65536
-static uint8_t whale_heap[HEAP_SIZE];
+int mouse_x = 512;
+int mouse_y = 384;
+uint8_t mouse_cycle = 0;
+uint8_t mouse_byte[3];
+int clicked_object_id = -1;
+int mouse_was_clicked = 0;
+int terminal_active = 0;
+char input_buffer[64];
+int input_len = 0;
+struct gui_object { int id; int x; int y; int w; int h; };
+struct gui_object objects[50];
+int obj_count = 0;
+int menu_open = 0;
+int app_open[10] = {0};
 
-typedef struct k_mem_header {
-    uint32_t size;
-    uint8_t  is_free;
-    struct k_mem_header* next;
-} k_mem_header_t;
+unsigned char font8x8[95][8] = {
+    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, {0x18,0x3C,0x3C,0x18,0x18,0x00,0x18,0x00}, {0x6C,0x6C,0x6C,0x00,0x00,0x00,0x00,0x00}, {0x36,0x36,0x7F,0x36,0x7F,0x36,0x36,0x00},
+    {0x18,0x3E,0x60,0x3C,0x06,0x7C,0x18,0x00}, {0x00,0xC6,0xCC,0x18,0x30,0x66,0xC6,0x00}, {0x38,0x6C,0x6C,0x38,0x6D,0x66,0x3B,0x00}, {0x0C,0x18,0x30,0x00,0x00,0x00,0x00,0x00},
+    {0x18,0x30,0x60,0x60,0x60,0x30,0x18,0x00}, {0x60,0x30,0x18,0x18,0x18,0x30,0x60,0x00}, {0x00,0x66,0x3C,0xFF,0x3C,0x66,0x00,0x00}, {0x00,0x18,0x18,0x7E,0x18,0x18,0x00,0x00},
+    {0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x30}, {0x00,0x00,0x00,0x7E,0x00,0x00,0x00,0x00}, {0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x00}, {0x06,0x0C,0x18,0x30,0x60,0xC0,0x00,0x00},
+    {0x3C,0x66,0x66,0x6E,0x76,0x66,0x3C,0x00}, {0x18,0x38,0x58,0x18,0x18,0x18,0x7E,0x00}, {0x3C,0x66,0x06,0x0C,0x18,0x30,0x7E,0x00}, {0x7E,0x06,0x1C,0x06,0x06,0x66,0x3C,0x00},
+    {0x0C,0x1C,0x2C,0x4C,0x7E,0x0C,0x0C,0x00}, {0x7E,0x60,0x7C,0x06,0x06,0x66,0x3C,0x00}, {0x3C,0x66,0x60,0x7C,0x66,0x66,0x3C,0x00}, {0x7E,0x06,0x0C,0x18,0x30,0x30,0x30,0x00},
+    {0x3C,0x66,0x66,0x3C,0x66,0x66,0x3C,0x00}, {0x3C,0x66,0x66,0x3E,0x06,0x66,0x3C,0x00}, {0x00,0x18,0x18,0x00,0x00,0x18,0x18,0x00}, {0x00,0x18,0x18,0x00,0x00,0x18,0x18,0x30},
+    {0x06,0x0C,0x18,0x30,0x18,0x0C,0x06,0x00}, {0x00,0x00,0x7E,0x00,0x7E,0x00,0x00,0x00}, {0x60,0x30,0x18,0x0C,0x18,0x30,0x60,0x00}, {0x3C,0x66,0x06,0x0C,0x18,0x00,0x18,0x00},
+    {0x3C,0x66,0x6E,0x6E,0x60,0x3E,0x00,0x00}, {0x3C,0x66,0x66,0x7E,0x66,0x66,0x66,0x00}, {0x7C,0x66,0x66,0x7C,0x66,0x66,0x7C,0x00}, {0x3C,0x66,0x60,0x60,0x60,0x66,0x3C,0x00},
+    {0x78,0x6C,0x66,0x66,0x66,0x6C,0x78,0x00}, {0x7E,0x60,0x60,0x7C,0x60,0x60,0x7E,0x00}, {0x7E,0x60,0x60,0x7C,0x60,0x60,0x60,0x00}, {0x3C,0x66,0x60,0x6E,0x66,0x66,0x3E,0x00},
+    {0x66,0x66,0x66,0x7E,0x66,0x66,0x66,0x00}, {0x3E,0x18,0x18,0x18,0x18,0x18,0x3E,0x00}, {0x06,0x06,0x06,0x06,0x06,0x66,0x3C,0x00}, {0x66,0x6C,0x78,0x70,0x78,0x6C,0x66,0x00},
+    {0x60,0x60,0x60,0x60,0x60,0x60,0x7E,0x00}, {0x63,0x77,0x7F,0x6B,0x63,0x63,0x63,0x00}, {0x66,0x76,0x7E,0x7E,0x6E,0x66,0x66,0x00}, {0x3C,0x66,0x66,0x66,0x66,0x66,0x3C,0x00},
+    {0x7C,0x66,0x66,0x7C,0x60,0x60,0x60,0x00}, {0x3C,0x66,0x66,0x66,0x6A,0x6C,0x36,0x00}, {0x7C,0x66,0x66,0x7C,0x6C,0x66,0x66,0x00}, {0x3C,0x66,0x60,0x3C,0x06,0x66,0x3C,0x00},
+    {0x7E,0x18,0x18,0x18,0x18,0x18,0x18,0x00}, {0x66,0x66,0x66,0x66,0x66,0x66,0x3C,0x00}, {0x66,0x66,0x66,0x66,0x66,0x3C,0x18,0x00}, {0x63,0x63,0x63,0x6B,0x7F,0x77,0x63,0x00},
+    {0x66,0x66,0x3C,0x18,0x3C,0x66,0x66,0x00}, {0x66,0x66,0x66,0x3C,0x18,0x18,0x18,0x00}, {0x7E,0x06,0x0C,0x18,0x30,0x60,0x7E,0x00}, {0x3C,0x30,0x30,0x30,0x30,0x30,0x3C,0x00},
+    {0x00,0x60,0x30,0x18,0x0C,0x06,0x00,0x00}, {0x3C,0x0C,0x0C,0x0C,0x0C,0x0C,0x3C,0x00}, {0x18,0x3C,0x66,0x00,0x00,0x00,0x00,0x00}, {0x00,0x00,0x00,0x00,0x00,0x00,0xFF,0x00},
+    {0x30,0x18,0x00,0x00,0x00,0x00,0x00,0x00}, {0x00,0x00,0x3C,0x06,0x3E,0x66,0x3E,0x00}, {0x60,0x60,0x7C,0x66,0x66,0x66,0x7C,0x00}, {0x00,0x00,0x3C,0x60,0x60,0x60,0x3C,0x00},
+    {0x06,0x06,0x3E,0x66,0x66,0x66,0x3E,0x00}, {0x00,0x00,0x3C,0x66,0x7E,0x60,0x3C,0x00}, {0x1C,0x30,0x78,0x30,0x30,0x30,0x30,0x00}, {0x00,0x00,0x3E,0x66,0x66,0x3E,0x06,0x3C},
+    {0x60,0x60,0x7C,0x66,0x66,0x66,0x66,0x00}, {0x18,0x00,0x38,0x18,0x18,0x18,0x3C,0x00}, {0x0C,0x00,0x1C,0x0C,0x0C,0x0C,0x0C,0x38}, {0x60,0x60,0x66,0x6C,0x78,0x6C,0x66,0x00},
+    {0x38,0x18,0x18,0x18,0x18,0x18,0x3C,0x00}, {0x00,0x00,0x76,0x7F,0x6B,0x6B,0x6B,0x00}, {0x00,0x00,0x7C,0x66,0x66,0x66,0x66,0x00}, {0x00,0x00,0x3C,0x66,0x66,0x66,0x3C,0x00},
+    {0x00,0x00,0x7C,0x66,0x66,0x7C,0x60,0x60}, {0x00,0x00,0x3E,0x66,0x66,0x3E,0x06,0x06}, {0x00,0x00,0x7C,0x66,0x60,0x60,0x60,0x00}, {0x00,0x00,0x3E,0x60,0x3C,0x06,0x7C,0x00},
+    {0x30,0x78,0x30,0x30,0x30,0x34,0x18,0x00}, {0x00,0x00,0x66,0x66,0x66,0x66,0x3E,0x00}, {0x00,0x00,0x66,0x66,0x66,0x3C,0x18,0x00}, {0x00,0x00,0x63,0x6B,0x6B,0x7F,0x36,0x00},
+    {0x00,0x00,0x66,0x3C,0x18,0x3C,0x66,0x00}, {0x00,0x00,0x66,0x66,0x66,0x3E,0x0C,0x38}, {0x00,0x00,0x7E,0x0C,0x18,0x30,0x7E,0x00}, {0x0E,0x18,0x18,0x70,0x18,0x18,0x0E,0x00},
+    {0x18,0x18,0x18,0x00,0x18,0x18,0x18,0x00}, {0x70,0x18,0x18,0x0E,0x18,0x18,0x70,0x00}, {0x3B,0x6E,0x00,0x00,0x00,0x00,0x00,0x00}
+};
 
-k_mem_header_t* free_list = (k_mem_header_t*)whale_heap;
+const uint8_t win_cursor[8][8] = {
+    {15, 15,  0,  0,  0,  0,  0,  0},
+    {15, 15, 15,  0,  0,  0,  0,  0},
+    {15, 15, 15, 15,  0,  0,  0,  0},
+    {15, 15, 15, 15, 15,  0,  0,  0},
+    {15, 15, 15, 15, 15, 15,  0,  0},
+    {15, 15, 15, 15, 15, 15, 15,  0},
+    {15, 15, 15,  0,  0,  0,  0,  0},
+    {15,  0,  0, 15,  0,  0,  0,  0}
+};
 
-void init_whale_malloc() {
-    free_list->size = HEAP_SIZE - sizeof(k_mem_header_t);
-    free_list->is_free = 1; free_list->next = 0;
-    k_print("[Kernel RAM] Heap de 64KB Inicializado.\n");
-}
-
-void* whale_malloc(uint32_t size) {
-    k_mem_header_t* curr = free_list;
-    while (curr) {
-        if (curr->is_free && curr->size >= size) {
-            if (curr->size > size + sizeof(k_mem_header_t) + 4) {
-                k_mem_header_t* next_block = (k_mem_header_t*)((uint8_t*)curr + sizeof(k_mem_header_t) + size);
-                next_block->size = curr->size - size - sizeof(k_mem_header_t);
-                next_block->is_free = 1; next_block->next = curr->next;
-                curr->size = size; curr->next = next_block;
-            }
-            curr->is_free = 0;
-            return (void*)((uint8_t*)curr + sizeof(k_mem_header_t));
-        }
-        curr = curr->next;
-    }
-    return 0;
-}
-
-void whale_free(void* ptr) {
-    if (!ptr) return;
-    k_mem_header_t* header = (k_mem_header_t*)((uint8_t*)ptr - sizeof(k_mem_header_t));
-    header->is_free = 1;
-}
-
-struct vfs_entry { char name[16]; char content[512]; };
-struct vfs_entry storage_ram[16];
-int fs_count = 0;
-
-void sys_vfs_write(const char* name, const char* data) {
-    if (fs_count >= 16) return;
-    int i = 0; while (name[i] && i < 15) { storage_ram[fs_count].name[i] = name[i]; i++; }
-    storage_ram[fs_count].name[i] = 0;
-    i = 0; while (data[i] && i < 511) { storage_ram[fs_count].content[i] = data[i]; i++; }
-    storage_ram[fs_count].content[i] = 0;
-    fs_count++;
-}
-
-void sys_vfs_list() {
-    k_print("\nArquivos no VFS:\n");
-    if(fs_count == 0) { k_print("  (vazio)\n"); }
-    for(int idx = 0; idx < fs_count; idx++) { k_print("  - "); k_print(storage_ram[idx].name); k_print("\n"); }
-}
-
-void run_native_tcc_compiler(const char* code) {
-    k_print("\n[WhaleOS TCC v1.0] Compilando no Heap...\n");
-    int loop_limit = 1; char print_buffer[64] = {0};
-    int has_for = 0; int has_printf = 0;
-
-    char* token_table = (char*)whale_malloc(256);
-    if(!token_table) return;
-
-    char* cursor = (char*)code;
-    while(*cursor) {
-        if(cursor[0]=='f' && cursor[1]=='o' && cursor[2]=='r') {
-            int idx = 3; while(cursor[idx] && cursor[idx] != '<') idx++;
-            if(cursor[idx] == '<') {
-                idx++; while(cursor[idx] == ' ') idx++;
-                if(cursor[idx] >= '0' && cursor[idx] <= '9') { loop_limit = cursor[idx] - '0'; has_for = 1; }
-            }
-        }
-        cursor++;
-    }
-
-    cursor = (char*)code;
-    while(*cursor) {
-        if(cursor[0]=='p' && cursor[1]=='r' && cursor[2]=='i' && cursor[3]=='n' && cursor[4]=='t' && cursor[5]=='f') {
-            char* s = 0; char* e = 0; int idx = 6;
-            while(cursor[idx] && cursor[idx] != '"') idx++;
-            if(cursor[idx] == '"') { s = &cursor[idx+1]; idx++; }
-            while(cursor[idx] && cursor[idx] != '"') idx++;
-            if(cursor[idx] == '"') e = &cursor[idx];
-            if(s && e) {
-                int k = 0; while(s < e && k < 63) {
-                    if(*s == '\\' && *(s+1) == 'n') { print_buffer[k++] = '\n'; s+=2; }
-                    else { print_buffer[k++] = *s; s++; }
-                } print_buffer[k] = 0; has_printf = 1;
-            }
-        }
-        cursor++;
-    }
-
-    if(has_printf) {
-        for(int i = 0; i < loop_limit; i++) {
-            if(has_for) { k_print("Iteracao "); k_print_char('0' + i); k_print(": "); }
-            k_print(print_buffer);
-        }
-    }
-    whale_free(token_table);
-}
-
-char input_buffer[64]; int input_len = 0; char saved_editor_name[16] = {0};
-char kbd_map_normal[128] = { 0, 27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b', '\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n', 0, 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`', 0, '\\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0, '*', 0, ' ' };
-char kbd_map_shift[128]  = { 0, 27, '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '_', '+', '\b', '\t', 'Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P', '{', '}', '\n', 0, 'A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L', ':', '"', '~', 0, '|',  'Z', 'X', 'C', 'V', 'B', 'N', 'M', '<', '>', '?', 0, '*', 0, ' ' };
-
-void process_shell_command(char* cmd) {
-    if (k_strcmp(cmd, "malloc") == 0) {
-        k_print("\n[Malloc] Alocando 16 bytes...\n");
-        void* ptr = whale_malloc(16);
-        if(ptr) { k_print("[OK] Sucesso!\n"); whale_free(ptr); }
-    }
-    else if (k_strcmp(cmd, "dir") == 0) {
-        sys_vfs_list();
-    }
-}
-
-
-void whale_kernel_main() {
-    int i = 0;
-    while("WhaleOS C:/"[i]) { current_tag[i] = "WhaleOS C:/"[i]; i++; } current_tag[i] = 0;
-    init_whale_malloc();
-    current_color_attribute = 0x0A;
-    for(int i=0; i<80*25*2; i+=2) { vga_mem[i]=' '; vga_mem[i+1]=current_color_attribute; }
-    k_print("[WhaleOS Framework Shell Ativo]\n");
-    k_print(current_tag);
-    while(1) {
-        if (inb(0x64) & 1) {
-            uint8_t scancode = inb(0x60);
-            if (scancode == 0x2A || scancode == 0x36) { shift_pressed = 1; }
-            else if (scancode == 0xAA || scancode == 0xB6) { shift_pressed = 0; }
-            else if (!(scancode & 0x80)) {
-                char key = shift_pressed ? kbd_map_shift[scancode] : kbd_map_normal[scancode];
-                if (key == '\n') {
-                    input_buffer[input_len] = 0;
-                    /* --- Execucao do Interpretador Customizado --- */
-                    if (k_strcmp(input_buffer, "dir") == 0) {
-                    sys_vfs_list();
-                    } else {
-                    k_print("\nComando nao reconhecido no motor da baleia");
-                    }
-                    if(!editor_mode_active) { k_print("\n"); k_print(current_tag); }
-                    input_len = 0;
-                } else if (key == '\b') {
-                    if (input_len > 0) { input_len--; cursor_idx -= 2; vga_mem[cursor_idx] = ' '; }
-                } else if (key > 0 && input_len < 63) {
-                    input_buffer[input_len++] = key; k_print_char(key);
+void draw_real_char(char c, int x, int y, uint32_t color) {
+    if (c < 32 || c > 126) return;
+    int idx = c - 32;
+    uint32_t c_hex = get_color(color);
+    for (int i = 0; i < 8; i++) {
+        for (int j = 0; j < 8; j++) {
+            if (font8x8[idx][i] & (1 << (7 - j))) {
+                if ((y + i) < 768 && (x + j) < 1024) {
+                    double_buffer[(y + i) * 1024 + (x + j)] = c_hex;
                 }
             }
+        }
+    }
+}
+
+void draw_real_string(const char* s, int x, int y, uint32_t color) {
+    while (*s) {
+        draw_real_char(*s, x, y, color);
+        x += 8;
+        s++;
+    }
+}
+
+void draw_real_rectangle(int w, int h, uint32_t color, int x, int y, int id) {
+    if (obj_count < 50 && id > 0) {
+        objects[obj_count].id = id;
+        objects[obj_count].x = x;
+        objects[obj_count].y = y;
+        objects[obj_count].w = w;
+        objects[obj_count].h = h;
+        obj_count++;
+    }
+    uint32_t c_hex = get_color(color);
+    for (int i = 0; i < h; i++) {
+        for (int j = 0; j < w; j++) {
+            if ((y + i) < 768 && (x + j) < 1024) {
+                double_buffer[(y + i) * 1024 + (x + j)] = c_hex;
+            }
+        }
+    }
+}
+
+void draw_image_array(const uint32_t* img_data, int w, int h, int start_x, int start_y) {
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            uint32_t pixel = img_data[y * w + x];
+            if ((pixel >> 24) > 10) {
+                if ((start_y + y) < 768 && (start_x + x) < 1024) {
+                    double_buffer[(start_y + y) * 1024 + (start_x + x)] = pixel;
+                }
+            }
+        }
+    }
+}
+
+void mouse_wait(uint8_t a_type) {
+    uint32_t timeout = 100000;
+    if (a_type == 0) {
+        while (timeout--) {
+            if ((inb(0x64) & 1) == 1) return;
+        }
+    } else {
+        while (timeout--) {
+            if ((inb(0x64) & 2) == 0) return;
+        }
+    }
+}
+
+void mouse_write(uint8_t a_write) {
+    mouse_wait(1);
+    outb(0x64, 0xD4);
+    mouse_wait(1);
+    outb(0x60, a_write);
+}
+
+void init_hardware_mouse() {
+    uint8_t s;
+    mouse_wait(1);
+    outb(0x64, 0xA8);
+    mouse_wait(1);
+    outb(0x64, 0x20);
+    mouse_wait(0);
+    s = (inb(0x60) | 2);
+    mouse_wait(1);
+    outb(0x64, 0x60);
+    mouse_wait(1);
+    outb(0x60, s);
+    mouse_write(0xF4);
+    inb(0x60);
+}
+
+char kbd_map[128] = { 0,27,'1','2','3','4','5','6','7','8','9','0','-','=','\b','\t','q','w','e','r','t','y','u','i','o','p','[',']','\n',0,'a','s','d','f','g','h','j','k','l',';','\'','`',0,'\\','z','x','c','v','b','n','m',',','.','/',0,'*',0,' ' };
+void handle_keyboard() {
+    uint8_t s = inb(0x64);
+    if (s & 1 && !(s & 0x20)) {
+        uint8_t scan = inb(0x60);
+        if (!(scan & 0x80)) {
+            char key = kbd_map[scan];
+            if (key == '\n') {
+                input_buffer[input_len] = 0;
+                if (k_strcmp(input_buffer, "cli") == 0) terminal_active = 1;
+                else if (k_strcmp(input_buffer, "gui") == 0) terminal_active = 0;
+                input_len = 0;
+            } else if (key > 0 && input_len < 30) {
+                input_buffer[input_len++] = key;
+            }
+        }
+    }
+}
+
+void update_hardware_mouse() {
+    uint8_t s = inb(0x64);
+    if (!(s & 1) || !(s & 0x20)) return;
+    uint8_t val = inb(0x60);
+    switch (mouse_cycle) {
+        case 0:
+            if (val & 0x08) {
+                mouse_byte[0] = val;
+                mouse_cycle++;
+            }
+            break;
+        case 1:
+            mouse_byte[1] = val;
+            mouse_cycle++;
+            break;
+        case 2:
+            mouse_byte[2] = val;
+            mouse_cycle = 0;
+            mouse_x += (int8_t)mouse_byte[1];
+            mouse_y -= (int8_t)mouse_byte[2];
+            if (mouse_x < 0) mouse_x = 0;
+            if (mouse_x > 1016) mouse_x = 1016;
+            if (mouse_y < 0) mouse_y = 0;
+            if (mouse_y > 760) mouse_y = 760;
+            if (mouse_byte[0] & 1) {
+                if (mouse_was_clicked == 0) {
+                    for (int i = 0; i < obj_count; i++) {
+                        if (mouse_x >= objects[i].x && mouse_x <= (objects[i].x + objects[i].w) && mouse_y >= objects[i].y && mouse_y <= (objects[i].y + objects[i].h)) {
+                            clicked_object_id = objects[i].id;
+                        }
+                    }
+                    mouse_was_clicked = 1;
+                }
+            } else {
+                mouse_was_clicked = 0;
+            }
+            break;
+    }
+}
+
+void whale_kernel_main(uint32_t magic, uint32_t mbd) {
+    if (magic != 0x2BADB002) return;
+    uint32_t fb_addr = *(((uint32_t*)(mbd + 88)));
+    vga = (volatile uint32_t*)fb_addr;
+
+    char app_registry[2][32];
+    k_strcpy(app_registry[0], "Calculadora");
+    k_strcpy(app_registry[1], "Editor");
+    while (1) {
+        handle_keyboard();
+        update_hardware_mouse();
+        obj_count = 0;
+
+        if (!terminal_active) {
+            for (int i = 0; i < 786432; i++) double_buffer[i] = 0xFF222222;
+        } else {
+            for (int i = 0; i < 786432; i++) double_buffer[i] = 0xFF000000;
+        }
+
+        if (!terminal_active) {
+            draw_image_array(img_0, 100, 100, 460, 300);
+        }
+        if (!terminal_active) {
+            draw_real_rectangle(1024, 40, 8, 0, 728, 2);
+        }
+        if (!terminal_active) {
+            draw_real_rectangle(60, 20, 1, 10, 738, 1);
+        }
+        if (!terminal_active) {
+            draw_real_string("START", 20, 744, 15);
+        }
+        if (mouse_x == 512 && mouse_y == 384) {
+            init_hardware_mouse();
+        }
+        if (clicked_object_id == 1) {
+            menu_open = !menu_open;
+            clicked_object_id = -1;
+        }
+        if (menu_open && !terminal_active) {
+            draw_real_rectangle(200, 300, 9, 0, 428, -1);
+            draw_real_rectangle(200, 20, 1, 0, 428, -1);
+            draw_real_string("Montenegro Work", 0 + 10, 428 + 6, 15);
+            for (int i = 0; i < 2; i++) {
+                draw_real_string(app_registry[i], 0 + 20, 428 + 35 + (i * 25), 15);
+                draw_real_rectangle(200 - 40, 20, 8, 0 + 10, 428 + 30 + (i * 25), 300 + i);
+            }
+        }
+        if (!terminal_active) {
+            for (int i = 0; i < 2; i++) {
+                if (app_open[i]) {
+                    int wx = 300 + (i * 40);
+                    int wy = 200 + (i * 40);
+                    draw_real_rectangle(400, 300, 7, wx, wy, -1);
+                    draw_real_rectangle(400, 25, 1, wx, wy, -1);
+                    draw_real_string(app_registry[i], wx + 10, wy + 8, 15);
+                    draw_real_rectangle(20, 15, 4, wx + 375, wy + 5, 400 + i);
+                    draw_real_string("X", wx + 381, wy + 8, 15);
+                    draw_real_rectangle(380, 260, 15, wx + 10, wy + 30, -1);
+                    draw_real_string("APP ABERTO", wx + 150, wy + 150, 0);
+                }
+            }
+
+            if (clicked_object_id >= 300 && clicked_object_id < 400) {
+                app_open[clicked_object_id - 300] = 1;
+                menu_open = 0;
+                clicked_object_id = -1;
+            }
+            if (clicked_object_id >= 400 && clicked_object_id < 500) {
+                app_open[clicked_object_id - 400] = 0;
+                clicked_object_id = -1;
+            }
+            clicked_object_id = -1;
+
+            for (int i = 0; i < 8; i++) {
+                for (int j = 0; j < 8; j++) {
+                    if (win_cursor[i][j]) {
+                        if (mouse_y + i < 768 && mouse_x + j < 1024) {
+                            double_buffer[(mouse_y + i) * 1024 + (mouse_x + j)] = 0xFFFFFFFF;
+                        }
+                    }
+                }
+            }
+
+            k_memcpy((void*)vga, double_buffer, 1024 * 768 * 4);
+        } else {
+            draw_real_string("WHALEOS NATIVE CLI", 10, 10, 10);
+            draw_real_string("# ", 10, 30, 15);
+            for (int n = 0; n < input_len; n++) {
+                draw_real_char(input_buffer[n], 26 + (n * 8), 30, 15);
+            }
+            k_memcpy((void*)vga, double_buffer, 1024 * 768 * 4);
         }
     }
 }
