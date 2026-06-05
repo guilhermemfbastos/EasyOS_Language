@@ -1,0 +1,4 @@
+// Conteúdo do arquivo barra.eos
+Draw.Rectangle(1024, 40, 8, 0, 728, 2)
+Draw.Rectangle(60, 20, 1, 10, 738, 1)
+Draw.Label("START", 15, 20, 744, 1)
